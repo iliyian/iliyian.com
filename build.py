@@ -6,7 +6,16 @@ def run_command(command, cwd):
     print(f"Running command: {command} in {cwd}")
     subprocess.check_call(command, shell=True, cwd=cwd)
 
+def check_and_install_deps(path):
+    node_modules_path = os.path.join(path, "node_modules")
+    if not os.path.exists(node_modules_path):
+        print(f"node_modules not found in {path}, installing dependencies...")
+        run_command("npm install", path)
+    else:
+        print(f"node_modules exists in {path}, skipping npm install.")
+
 def build_hexo(path):
+    check_and_install_deps(path)
     print(f"Building Hexo in {path}...")
     run_command("npx hexo clean", path)
     run_command("npx hexo generate", path)
