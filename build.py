@@ -44,5 +44,9 @@ def main():
     
     print("Build complete! The combined site is in blogxyz/public")
 
+    # 4. Deploy to GitHub
+    print("Deploying to GitHub...")
+    run_command("npx hexo deploy", cn_path)
+
 if __name__ == "__main__":
     main()
