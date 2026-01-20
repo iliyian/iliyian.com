@@ -1,6 +1,6 @@
 [submodule "blogxyz"]
 	path = blogxyz
-	url = https://github.com/iliyian/blogxyz.git
+	url = git@github.com:iliyian/blogxyz.git
 [submodule "blogxyz-en"]
 	path = blogxyz-en
-	url = https://github.com/iliyian/blogxyz-en.git
+	url = git@github.com:iliyian/blogxyz-en.git
