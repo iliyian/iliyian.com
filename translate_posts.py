@@ -117,7 +117,7 @@ def translate_text(client: OpenAI, text: str, title: str, filename: str) -> tupl
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ],
-        temperature=0.3,
+        # temperature=0.3,
         stream=True
     )
     
