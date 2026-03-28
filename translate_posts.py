@@ -10,7 +10,7 @@
 
 import os
 import sys
-import re
+
 import argparse
 import time
 import signal
@@ -40,55 +40,99 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL")
 SOURCE_DIR = Path("blogxyz/source/_posts")
 TARGET_DIR = Path("blogxyz-en/source/_posts")
 
+# 需要翻译的 frontmatter 字段
+TRANSLATE_FIELDS = ["title", "description", "message"]
 
-def parse_markdown(content: str) -> tuple[list[str], str, str]:
+
+def parse_markdown(content: str) -> tuple[list[str], str, dict[str, str]]:
     """
     解析 Markdown 文件，分离 frontmatter 和正文。
-    返回: (frontmatter_lines, body, title)
+    返回: (frontmatter_lines, body, fields)
     frontmatter_lines 是包含 --- 分隔符的行列表
+    fields 是需要翻译的字段字典 {字段名: 值}
     """
     lines = content.split('\n')
-    
+
     # 第一行应该是 ---
     if lines[0] != '---':
         print("错误: 文件格式不正确，缺少 frontmatter")
         sys.exit(1)
-    
+
     # 找到第二个 ---
     end_index = -1
     for i in range(1, len(lines)):
         if lines[i] == '---':
             end_index = i
             break
-    
+
     if end_index == -1:
         print("错误: 文件格式不正确，frontmatter 未闭合")
         sys.exit(1)
-    
+
     # frontmatter 行（包含两个 ---）
     frontmatter_lines = lines[:end_index + 1]
-    
+
     # 正文（从 --- 后一行开始）
     body = '\n'.join(lines[end_index + 1:])
-    
-    # 提取 title：第二行（索引1），第一个空格后的内容
-    title_line = lines[1]
-    if ' ' in title_line:
-        title = title_line.split(' ', 1)[1]
-    else:
-        title = ""
-    
-    return frontmatter_lines, body, title
+
+    # 提取需要翻译的字段
+    fields = {}
+    for line in frontmatter_lines[1:end_index]:
+        for field in TRANSLATE_FIELDS:
+            if line.startswith(f"{field}:"):
+                value = line.split(':', 1)[1].strip()
+                if value:
+                    fields[field] = value
+                break
+
+    return frontmatter_lines, body, fields
 
 
-def translate_text(client: OpenAI, text: str, title: str, filename: str) -> tuple[str, str]:
+def translate_field(client: OpenAI, field_name: str, value: str, filename: str) -> str:
     """
-    使用 OpenAI API 翻译文本和标题。
-    返回: (translated_body, translated_title)
+    使用 OpenAI API 翻译单个 frontmatter 字段。
+    返回翻译后的字段值。
+    """
+    if not value.strip():
+        return value
+
+    system_prompt = """你是一位专业的翻译。请将以下中文文本翻译成英文。
+
+重要规则：
+1. **必须严格保持原文的行文风格**
+2. 对于中文诗词或文学引用，务必翻译的古色古香
+3. 不要添加任何解释或注释——只提供翻译内容
+4. 只输出翻译结果，不要输出任何其他内容"""
+
+    print(f"  正在翻译字段 {field_name}: {value}")
+
+    stream = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": value}
+        ],
+        stream=True
+    )
+
+    result = ""
+    for chunk in stream:
+        if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
+            result += chunk.choices[0].delta.content
+
+    result = result.strip()
+    print(f"  翻译结果: {result}")
+    return result
+
+
+def translate_body(client: OpenAI, text: str, filename: str) -> str:
+    """
+    使用 OpenAI API 翻译正文。
+    返回翻译后的正文。
     """
     if not text.strip():
-        return text, title
-    
+        return text
+
     system_prompt = """你是一位专业的翻译。请将以下中文博客文章内容翻译成英文。
 
 重要规则：
@@ -97,65 +141,41 @@ def translate_text(client: OpenAI, text: str, title: str, filename: str) -> tupl
 3. 保持所有英文文本、URL、代码片段和技术术语不变
 4. **必须严格保持原文的行文风格**
 5. 对于中文诗词或文学引用，务必翻译的古色古香
-6. 不要添加任何解释或注释——只提供翻译内容
+6. 不要添加任何解释或注释——只提供翻译内容"""
 
-输出格式要求：
-- 第一行必须是：[TITLE] 翻译后的标题
-- 第二行必须是空行
-- 从第三行开始是翻译后的正文内容
-"""
+    print(f"  正在翻译正文 {filename}...")
 
-    # 构建用户消息，包含标题和正文
-    user_message = f"文章标题：{title}\n\n文章正文：\n{text}"
-
-    print(f"  正在翻译 {filename}...")
-    
-    # 使用流式输出
     stream = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": text}
         ],
         stream=True
     )
-    
-    result_content = ""
+
+    result = ""
     first_content_received = False
-    
+
     for chunk in stream:
-        # 处理正文内容
         if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
             if not first_content_received:
                 print("  开始接收翻译结果...")
                 first_content_received = True
-            content = chunk.choices[0].delta.content
-            result_content += content
-    
-    # 解析翻译结果，提取标题和正文
-    lines = result_content.split('\n', 2)
-    translated_title = title  # 默认使用原标题
-    translated_body = result_content
-    
-    if lines and lines[0].startswith('[TITLE]'):
-        translated_title = lines[0].replace('[TITLE]', '').strip()
-        # 跳过标题行和空行，获取正文
-        if len(lines) > 2:
-            translated_body = lines[2]
-        elif len(lines) > 1:
-            translated_body = lines[1]
-        else:
-            translated_body = ""
-    
-    return translated_body, translated_title
+            result += chunk.choices[0].delta.content
+
+    return result
 
 
-def update_frontmatter_title(frontmatter_lines: list[str], new_title: str) -> str:
+def update_frontmatter_fields(frontmatter_lines: list[str], translated_fields: dict[str, str]) -> str:
     """
-    更新 frontmatter 中的 title 字段并返回完整的 frontmatter 字符串。
+    更新 frontmatter 中的已翻译字段并返回完整的 frontmatter 字符串。
     """
-    # 第二行是 title 行，替换为新标题
-    frontmatter_lines[1] = f"title: {new_title}"
+    for i, line in enumerate(frontmatter_lines):
+        for field, value in translated_fields.items():
+            if line.startswith(f"{field}:"):
+                frontmatter_lines[i] = f"{field}: {value}"
+                break
     return '\n'.join(frontmatter_lines) + '\n'
 
 
@@ -173,17 +193,21 @@ def process_file(client: OpenAI, source_path: Path, target_path: Path):
         content = f.read()
     
     # 分离 frontmatter 和正文
-    frontmatter_lines, body, title = parse_markdown(content)
-    
-    print(f"  原标题: {title}")
-    
-    # 翻译正文和标题
-    translated_body, translated_title = translate_text(client, body, title, source_path.name)
-    
-    print(f"  翻译后标题: {translated_title}")
-    
-    # 更新 frontmatter 中的标题
-    updated_frontmatter = update_frontmatter_title(frontmatter_lines, translated_title)
+    frontmatter_lines, body, fields = parse_markdown(content)
+
+    if fields:
+        print(f"  待翻译字段: {', '.join(f'{k}={v}' for k, v in fields.items())}")
+
+    # 逐个翻译 frontmatter 字段
+    translated_fields = {}
+    for field_name, field_value in fields.items():
+        translated_fields[field_name] = translate_field(client, field_name, field_value, source_path.name)
+
+    # 翻译正文
+    translated_body = translate_body(client, body, source_path.name)
+
+    # 更新 frontmatter 中的字段
+    updated_frontmatter = update_frontmatter_fields(frontmatter_lines, translated_fields)
     
     # 组合翻译后的内容（在 frontmatter 后加一个额外换行）
     translated_content = updated_frontmatter + "\n" + translated_body
