@@ -1,3 +1,4 @@
+import argparse
 import os
 import shutil
 import subprocess
@@ -20,7 +21,14 @@ def build_hexo(path):
     run_command("npx hexo clean", path)
     run_command("npx hexo generate", path)
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--deploy", action="store_true")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     base_dir = os.getcwd()
     cn_path = os.path.join(base_dir, "blogxyz")
     en_path = os.path.join(base_dir, "blogxyz-en")
@@ -44,9 +52,9 @@ def main():
     
     print("Build complete! The combined site is in blogxyz/public")
 
-    # # 4. Deploy to GitHub
-    # print("Deploying to GitHub...")
-    # run_command("npx hexo deploy", cn_path)
+    if args.deploy:
+        print("Deploying to GitHub Pages...")
+        run_command("npx hexo deploy", cn_path)
 
 if __name__ == "__main__":
     main()
