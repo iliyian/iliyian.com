@@ -50,6 +50,14 @@ def main():
     
     shutil.copytree(en_public, cn_public_en)
     
+    # 4. Copy standalone pages to public directory
+    for page in ["cn-visitors.html"]:
+        src = os.path.join(base_dir, page)
+        dst = os.path.join(cn_path, "public", page)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+            print(f"Copied {page} to public/")
+
     print("Build complete! The combined site is in blogxyz/public")
 
     if args.deploy:
