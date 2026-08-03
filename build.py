@@ -50,7 +50,11 @@ def main():
     
     shutil.copytree(en_public, cn_public_en)
     
-    # 4. Copy standalone pages to public directory
+    # 4. 按站点实际使用字符生成精简字体（subset_fonts.py）
+    print("Subsetting fonts based on used characters...")
+    run_command("python subset_fonts.py", base_dir)
+
+    # 5. Copy standalone pages to public directory
     for page in ["cn-visitors.html"]:
         src = os.path.join(base_dir, page)
         dst = os.path.join(cn_path, "public", page)
