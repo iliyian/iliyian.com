@@ -2,6 +2,16 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
+
+def ensure_python_deps():
+    """确保字体子集化依赖可用（Netlify 等 CI 环境为全新 Python，无 fonttools/brotli）"""
+    try:
+        import brotli  # noqa: F401
+        import fontTools  # noqa: F401
+    except ImportError:
+        print("Installing font subsetting dependencies (fonttools, brotli)...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fonttools", "brotli"])
 
 def run_command(command, cwd):
     print(f"Running command: {command} in {cwd}")
@@ -30,6 +40,7 @@ def parse_args():
 def main():
     args = parse_args()
     base_dir = os.getcwd()
+    ensure_python_deps()
     cn_path = os.path.join(base_dir, "blogxyz")
     en_path = os.path.join(base_dir, "blogxyz-en")
     
