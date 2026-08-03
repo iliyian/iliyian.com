@@ -43,7 +43,10 @@ def main():
     ensure_python_deps()
     cn_path = os.path.join(base_dir, "blogxyz")
     en_path = os.path.join(base_dir, "blogxyz-en")
-    
+
+    # 0. Subset FontAwesome icons from scanned source (must run before hexo generate)
+    run_command("python subset_fontawesome.py", base_dir)
+
     # 1. Build Chinese version (blogxyz)
     build_hexo(cn_path)
     
@@ -64,6 +67,9 @@ def main():
     # 4. 按站点实际使用字符生成精简字体（subset_fonts.py）
     print("Subsetting fonts based on used characters...")
     run_command("python subset_fonts.py", base_dir)
+
+    # 4.5 校验构建产物中所有 fa- 图标都有对应 glyph
+    run_command("python subset_fontawesome.py --verify", base_dir)
 
     # 5. Copy standalone pages to public directory
     for page in ["cn-visitors.html"]:
