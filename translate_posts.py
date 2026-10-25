@@ -296,10 +296,10 @@ def main():
         target_path = TARGET_DIR / source_path.name
         
         # 检查目标文件是否已存在
-        if target_path.exists() and not args.force:
-            print(f"\n跳过文件: {source_path.name} (已存在)")
-            skip_count += 1
-            continue
+        # if target_path.exists() and not args.force:
+        #     print(f"\n跳过文件: {source_path.name} (已存在)")
+        #     skip_count += 1
+        #     continue
         
         try:
             process_file(client, source_path, target_path)
