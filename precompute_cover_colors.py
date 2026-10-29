@@ -191,10 +191,8 @@ def main():
             except Exception as exc:  # 单张失败不影响构建
                 print(f"[cover-colors] skip {url}: {exc}")
                 continue
-            if not rgb:
-                continue
+            # 近灰/无色封面也写入 null，运行时据此跳过采样，避免多下载一次
             colors[url] = rgb
-            # 兼容 HTML 里可能出现的编码/解码形式
             decoded = urllib.parse.unquote(url)
             if decoded != url:
                 colors[decoded] = rgb
