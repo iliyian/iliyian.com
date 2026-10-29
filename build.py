@@ -5,13 +5,14 @@ import subprocess
 import sys
 
 def ensure_python_deps():
-    """确保字体子集化依赖可用（Netlify 等 CI 环境为全新 Python，无 fonttools/brotli）"""
+    """确保字体子集化/封面取色依赖可用（Netlify 等 CI 环境为全新 Python）"""
     try:
         import brotli  # noqa: F401
         import fontTools  # noqa: F401
+        from PIL import Image  # noqa: F401
     except ImportError:
-        print("Installing font subsetting dependencies (fonttools, brotli)...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fonttools", "brotli"])
+        print("Installing dependencies (fonttools, brotli, pillow)...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fonttools", "brotli", "pillow"])
 
 def run_command(command, cwd):
     print(f"Running command: {command} in {cwd}")
@@ -63,7 +64,10 @@ def main():
         shutil.rmtree(cn_public_en)
     
     shutil.copytree(en_public, cn_public_en)
-    
+
+    # 3.5 预计算封面主色（128px q75 缩略图，构建时生成 cover-colors.js）
+    run_command("python precompute_cover_colors.py", base_dir)
+
     # 4. 按站点实际使用字符生成精简字体（subset_fonts.py）
     print("Subsetting fonts based on used characters...")
     run_command("python subset_fonts.py", base_dir)
