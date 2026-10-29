@@ -103,16 +103,23 @@ def _dominant_color(image):
 
 def _extract_urls(html):
     urls = set()
-    # 首页卡片封面：<img class="post-bg" data-lazy-src="...">
+    # filter 会在卡片/头图上写入原始封面 URL
+    for m in re.finditer(r'\bdata-cover-src\s*=\s*"([^"]*)"', html, re.I):
+        urls.add(unescape(m.group(1)).strip().strip("'\""))
+    # 首页卡片封面
     for tag in re.findall(r'<img\b[^>]*>', html, re.I):
         class_m = re.search(r'\bclass\s*=\s*"([^"]*)"', tag, re.I)
         if not class_m or 'post-bg' not in class_m.group(1).split():
             continue
-        src_m = re.search(r'\bdata-lazy-src\s*=\s*"([^"]*)"', tag, re.I) or re.search(r'\bsrc\s*=\s*"([^"]*)"', tag, re.I)
+        src_m = re.search(r'\bdata-cover-src\s*=\s*"([^"]*)"', tag, re.I) or re.search(r'\bdata-lazy-src\s*=\s*"([^"]*)"', tag, re.I) or re.search(r'\bsrc\s*=\s*"([^"]*)"', tag, re.I)
         if src_m:
             urls.add(unescape(src_m.group(1)).strip().strip("'\""))
-    # 文章头图：#page-header 的 inline background-image
+    # 文章头图
     for tag in re.findall(r'<[^>]*id\s*=\s*"page-header"[^>]*>', html, re.I):
+        cover_m = re.search(r'\bdata-cover-src\s*=\s*"([^"]*)"', tag, re.I)
+        if cover_m:
+            urls.add(unescape(cover_m.group(1)).strip().strip("'\""))
+            continue
         style_m = re.search(r'\bstyle\s*=\s*"([^"]*)"', tag, re.I)
         if not style_m:
             continue
@@ -120,7 +127,6 @@ def _extract_urls(html):
         if bg_m:
             urls.add(bg_m.group(1).strip().strip("'\""))
     return urls
-
 
 def _is_cover(url):
     if not url.lower().startswith(("http://", "https://")):
