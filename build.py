@@ -126,6 +126,12 @@ def create_deploy_workspace(base_dir):
             if os.path.isdir(node_modules):
                 os.symlink(node_modules, os.path.join(dst, "node_modules"))
 
+            # hexo-deployer-git 在 base_dir/.deploy_git 里保存 gh-pages 历史，
+            # 持久化到真实站点目录，避免临时工作区销毁时丢失部署历史
+            deploy_git = os.path.join(src, ".deploy_git")
+            if os.path.isdir(deploy_git):
+                os.symlink(deploy_git, os.path.join(dst, ".deploy_git"))
+
         for name in BUILD_FILES:
             src = os.path.join(base_dir, name)
             if os.path.exists(src):
@@ -139,7 +145,16 @@ def create_deploy_workspace(base_dir):
         remove_deploy_workspace(base_dir, workspace)
         raise
 
+def persist_deploy_history(base_dir, workspace):
+    """把 hexo-deployer-git 新建的 .deploy_git 移回真实站点目录，供下次部署续写历史"""
+    for site in SITES:
+        deploy_git = os.path.join(workspace, site, ".deploy_git")
+        target = os.path.join(base_dir, site, ".deploy_git")
+        if os.path.isdir(deploy_git) and not os.path.lexists(target):
+            shutil.move(deploy_git, target)
+
 def remove_deploy_workspace(base_dir, workspace):
+    persist_deploy_history(base_dir, workspace)
     for site in SITES:
         src = os.path.join(base_dir, site)
         dst = os.path.join(workspace, site)
