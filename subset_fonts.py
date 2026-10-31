@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """subset_fonts.py — 每次构建时，根据站点实际使用的字符生成精简字体
 
-用法（在仓库根目录）：
+用法（在仓库根目录，先跑过 hexo generate）：
     python subset_fonts.py
 
 流程：
-1. 扫描 blogxyz/public、blogxyz-en/public 中渲染后的 HTML/XML/JSON，以及两个站的
-   源码 _posts / _data / _config.yml，收集所有实际出现的字符；
-2. 合并安全字符集（ASCII、CJK 标点、全角符号、带圈数字、Latin-1 补充等），
-   为评论等 JS 动态内容兜底；
-3. 用 fontTools 将原始字体（从 R2 下载到内存，不落盘）裁剪为仅含这些字符的
-   woff2 子集字体；
-4. 输出到 blogxyz/source/fonts/（下次 hexo generate 自动拷入 public）和
+1. 扫描 blogxyz/public、blogxyz-en/public 中渲染后的 HTML/XML 原始文本
+   （包含内联脚本里的轮播诗句、文章标题、导航、meta 等）；
+2. 从 HTML 的 #page-header / #nav / #site-info / #post-info 中提取“首屏标题区”
+   字符，生成一个更小的 screen 字体，并通过 CSS 优先用于导航和页头；
+3. 合并安全字符集（ASCII、CJK 标点、全角符号、带圈数字、Latin-1 补充等），
+   为评论、Live2D、音乐播放器等动态内容兜底；
+4. 用 fontTools 将原始字体（从 R2 下载到内存，不落盘）裁剪为两个 woff2：
+   - LXGWWenKai-Medium.subset.woff2：全站静态内容
+   - LXGWWenKai-Screen.woff2：页头/导航/文章标题等首屏文字
+5. 输出到 blogxyz/source/fonts/（下次 hexo generate 自动拷入 public）和
    blogxyz/public/fonts/（本次构建的 public 已生成，直接覆盖使其立即可用）。
 """
 
 import gzip
 import io
+import json
 import os
+import re
 import sys
 import urllib.request
+from html.parser import HTMLParser
 
 import brotli
 from fontTools.subset import Options, Subsetter
@@ -27,37 +33,22 @@ from fontTools.ttLib import TTFont
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 需要裁剪的字体：src_url 为原始字体地址，out_name 为输出文件名
-FONTS = [
-    {
-        "src_url": "https://r2-imgs.iliyian.com/css/LXGWWenKai-Medium.ttf",
-        "out_name": "LXGWWenKai-Medium.subset.woff2",
-    },
-]
+FONT_SRC_URL = "https://r2-imgs.iliyian.com/css/LXGWWenKai-Medium.ttf"
+
+# 输出文件名
+GLOBAL_FONT_NAME = "LXGWWenKai-Medium.subset.woff2"
+SCREEN_FONT_NAME = "LXGWWenKai-Screen.woff2"
 
 # 扫描的文本来源目录（public 需先由 hexo generate 生成）
 SCAN_DIRS = [
     os.path.join(BASE_DIR, "blogxyz", "public"),
     os.path.join(BASE_DIR, "blogxyz-en", "public"),
-    os.path.join(BASE_DIR, "blogxyz", "source", "_posts"),
-    os.path.join(BASE_DIR, "blogxyz-en", "source", "_posts"),
-    os.path.join(BASE_DIR, "blogxyz", "source", "_data"),
-    os.path.join(BASE_DIR, "blogxyz-en", "source", "_data"),
 ]
 
-# 额外的文本文件（配置等）
-SCAN_FILES = [
-    os.path.join(BASE_DIR, "blogxyz", "_config.yml"),
-    os.path.join(BASE_DIR, "blogxyz-en", "_config.yml"),
-]
+# 只扫描渲染后的 HTML/XML 原始文本；内联脚本会带入轮播诗句等动态文案
+TEXT_EXTS = {".html", ".htm", ".xml"}
 
-# 文本文件扩展名；其余（字体/图片等二进制）一律跳过
-TEXT_EXTS = {
-    ".html", ".htm", ".xml", ".json", ".js", ".css",
-    ".md", ".yml", ".yaml", ".txt", ".svg", ".ejs",
-}
-
-# 超过该大小的文件跳过（避免误读大二进制文件）
+# 超过该大小的文件跳过（避免误读大二进制）
 MAX_FILE_SIZE = 8 * 1024 * 1024
 
 # 子集字体输出目录
@@ -65,6 +56,16 @@ OUTPUT_DIRS = [
     os.path.join(BASE_DIR, "blogxyz", "source", "fonts"),
     os.path.join(BASE_DIR, "blogxyz", "public", "fonts"),
 ]
+
+# 首屏字体额外保留的标点（页头可能出现的动态日期/数字等）
+SCREEN_SAFETY = set(chr(c) for c in range(0x20, 0x7F))
+SCREEN_SAFETY.update("，。！？；：、“”‘’（）《》〈〉—…·")
+
+# HTMLParser 中不会产生结束标签的元素
+VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
 
 
 def build_safety_charset():
@@ -83,30 +84,101 @@ def build_safety_charset():
     return chars
 
 
-def collect_chars():
-    """收集所有扫描来源中出现过的字符（含中文字符、标题、标签、主题 UI 文案等）。"""
-    chars = set()
-
-    def read_text(path):
-        try:
-            if os.path.getsize(path) > MAX_FILE_SIZE:
-                return
-            with open(path, "r", encoding="utf-8", errors="ignore") as fp:
-                chars.update(fp.read())
-        except OSError:
-            pass
-
+def iter_public_files():
+    """遍历两个站 public 下的 HTML/XML。"""
     for d in SCAN_DIRS:
         if not os.path.isdir(d):
             continue
         for root, _dirs, files in os.walk(d):
             for f in files:
                 if os.path.splitext(f)[1].lower() in TEXT_EXTS:
-                    read_text(os.path.join(root, f))
+                    yield os.path.join(root, f)
 
-    for f in SCAN_FILES:
-        if os.path.isfile(f):
-            read_text(f)
+
+def collect_chars():
+    """收集渲染后 public HTML/XML 原始文本中出现的字符。"""
+    chars = set()
+    for path in iter_public_files():
+        try:
+            if os.path.getsize(path) > MAX_FILE_SIZE:
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as fp:
+                chars.update(fp.read())
+        except OSError:
+            pass
+    return chars
+
+
+class ScreenTextParser(HTMLParser):
+    """收集 #page-header / #nav / #site-info / #post-info 内的文本。"""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.depth = 0
+        self.parts = []
+
+    def _is_screen_element(self, attrs):
+        values = dict(attrs)
+        ident = values.get("id", "")
+        classes = values.get("class", "").split()
+        return (
+            ident in {"page-header", "nav", "site-info", "post-info"}
+            or "site-name" in classes
+            or "site-info" in classes
+            or "post-info" in classes
+        )
+
+    def handle_starttag(self, tag, attrs):
+        if tag in VOID_TAGS:
+            return
+        hit = self._is_screen_element(attrs)
+        self.stack.append((tag, hit))
+        if hit:
+            self.depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        return
+
+    def handle_endtag(self, tag):
+        while self.stack:
+            open_tag, hit = self.stack.pop()
+            if hit:
+                self.depth = max(0, self.depth - 1)
+            if open_tag == tag:
+                break
+
+    def handle_data(self, data):
+        if self.depth > 0 and data.strip():
+            self.parts.append(data)
+
+
+SUB_RE = re.compile(r"const\s+sub\s*=\s*(\[[\s\S]*?\])(?:\.slice\(\))?", re.MULTILINE)
+
+
+def collect_screen_chars():
+    """收集所有页头、导航、文章标题区和 typed.js 轮播诗句的字符。"""
+    chars = set()
+    for path in iter_public_files():
+        try:
+            if os.path.getsize(path) > MAX_FILE_SIZE:
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as fp:
+                raw = fp.read()
+        except OSError:
+            continue
+
+        parser = ScreenTextParser()
+        parser.feed(raw)
+        chars.update("".join(parser.parts))
+
+        # 轮播诗句在 index.html 的内联 script 里，不在可见文本中
+        for match in SUB_RE.finditer(raw):
+            try:
+                for line in json.loads(match.group(1)):
+                    chars.update(line)
+            except (TypeError, ValueError):
+                pass
 
     return chars
 
@@ -134,13 +206,13 @@ def fetch_font(src_url):
         sys.exit(1)
 
 
-def subset_font(src_data, text):
+def subset_font(src_data, chars):
     """用 fontTools 裁剪字体，返回生成的 TTFont。"""
     opts = Options()
     opts.hinting = False                    # 去掉 hinting 指令，显著减小体积
     opts.layout_features = ["kern", "liga", "clig", "calt"]  # 只保留排版必需特性
     ss = Subsetter(options=opts)
-    ss.populate(text="".join(text))
+    ss.populate(text="".join(sorted(chars)))
     font = TTFont(io.BytesIO(src_data))
     ss.subset(font)
     return font
@@ -154,34 +226,48 @@ def save_font(font, out_path):
     font.flavor = None
 
 
+def build_font(src_data, chars, out_name):
+    print(f"处理字体: {out_name}（{len(chars)} 个字符）")
+    font = subset_font(src_data, chars)
+
+    # 统计字体中缺失的字符（如 emoji），仅作提示
+    cmap = font.getBestCmap()
+    missing = [c for c in chars if ord(c) not in cmap]
+    if missing:
+        print(f"  字体中不存在的字符 {len(missing)} 个（已忽略），"
+              f"如 {''.join(missing[:10])!r}")
+
+    size = 0
+    for out_dir in OUTPUT_DIRS:
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, out_name)
+        save_font(font, out_path)
+        size = os.path.getsize(out_path)
+        print(f"  已生成: {out_path} ({size / 1024:.0f} KB)")
+    return size, len(missing)
+
+
 def main():
-    chars = collect_chars() | build_safety_charset()
-    print(f"收集到 {len(chars)} 个字符（含安全字符集）")
+    if not any(os.path.isdir(d) for d in SCAN_DIRS) or not any(True for _ in iter_public_files()):
+        print("未找到 public HTML/XML，请先运行 hexo generate 生成站点。")
+        sys.exit(1)
 
-    for info in FONTS:
-        out_name = info["out_name"]
-        print(f"处理字体: {out_name}")
-        src = fetch_font(info["src_url"])
-        src_size = len(src)
+    global_chars = collect_chars() | build_safety_charset()
+    screen_chars = collect_screen_chars() | SCREEN_SAFETY
 
-        font = subset_font(src, chars)
+    print(f"全站字符: {len(global_chars)}（含安全字符集）")
+    print(f"首屏字符: {len(screen_chars)}（含首屏标点兜底）")
 
-        # 统计字体中缺失的字符（如 emoji），仅作提示
-        cmap = font.getBestCmap()
-        missing = [c for c in chars if ord(c) not in cmap]
-        if missing:
-            print(f"  字体中不存在的字符 {len(missing)} 个（已忽略），"
-                  f"如 {''.join(missing[:10])!r}")
+    src = fetch_font(FONT_SRC_URL)
+    src_kb = len(src) / 1024
 
-        # 输出到 source/fonts 与 public/fonts
-        for out_dir in OUTPUT_DIRS:
-            os.makedirs(out_dir, exist_ok=True)
-            out_path = os.path.join(out_dir, out_name)
-            save_font(font, out_path)
-            print(f"  已生成: {out_path} ({os.path.getsize(out_path) / 1024:.0f} KB)")
-
-        print(f"  体积: {src_size / 1024 / 1024:.1f} MB -> "
-              f"{os.path.getsize(os.path.join(OUTPUT_DIRS[0], out_name)) / 1024:.0f} KB")
+    for chars, out_name in (
+        (global_chars, GLOBAL_FONT_NAME),
+        (screen_chars, SCREEN_FONT_NAME),
+    ):
+        size, missing = build_font(src, chars, out_name)
+        print(f"  体积: {src_kb / 1024:.1f} MB -> {size / 1024:.0f} KB"
+              + (f"，缺字 {missing}" if missing else "，无缺字"))
 
 
 if __name__ == "__main__":
