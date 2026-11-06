@@ -109,6 +109,85 @@ def copy_standalone_page(base_dir, name, dst_dir):
     with open(dst, "wb") as fp:
         fp.write(data)
 
+def read_deploy_config(site_dir):
+    """从站点 _config.yml 读出 deploy 的 repo 与 branch（hexo-deployer-git 的目标）"""
+    config_path = os.path.join(site_dir, "_config.yml")
+    with open(config_path, encoding="utf-8") as fp:
+        lines = fp.read().splitlines()
+
+    repo = branch = None
+    in_deploy = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_deploy = line.strip() == "deploy:"
+            continue
+        if not in_deploy:
+            continue
+        key, _, value = line.strip().partition(":")
+        value = value.strip().strip('"\'')
+        if key == "repo" and value:
+            repo = value
+        elif key == "branch" and value:
+            branch = value
+    return repo, branch
+
+def ensure_deploy_history(site_dir):
+    """确保 .deploy_git 带着远端 gh-pages 历史。
+
+    hexo-deployer-git 在 .deploy_git 不存在时会 git init 一个全新仓库，再
+    `push --force` 推上去——远端 gh-pages 的历史会被整个覆盖掉。
+    .deploy_git 被 gitignore，换机器或干净 CI 上必然缺失，所以这里先从远端
+    克隆部署分支；克隆失败（离线/无权限）就放弃续写历史并明确警告。
+    """
+    deploy_dir = os.path.join(site_dir, ".deploy_git")
+    if os.path.isdir(os.path.join(deploy_dir, ".git")):
+        return True
+
+    repo, branch = read_deploy_config(site_dir)
+    if not repo:
+        print(f"Warning: no deploy repo configured in {site_dir}/_config.yml; "
+              "gh-pages history cannot be continued")
+        return False
+
+    # 远端还没有该分支（首次部署）时无历史可续写，让 deployer 照常新建即可
+    probe = subprocess.run(
+        ["git", "ls-remote", "--heads", repo, f"refs/heads/{branch}"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        print(f"Warning: could not reach {repo}: {probe.stderr.strip()}")
+        return False
+    if not probe.stdout.strip():
+        print(f"No {branch} branch on {repo} yet; starting a fresh deployment history")
+        return True
+
+    if os.path.isdir(deploy_dir):
+        shutil.rmtree(deploy_dir)
+
+    print(f"Cloning {branch} history from {repo} into {deploy_dir}")
+    result = subprocess.run(
+        ["git", "clone", "--branch", branch, "--single-branch", "--no-tags", repo, deploy_dir],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(
+            "Warning: could not clone existing deployment history; "
+            "hexo-deployer-git would overwrite it with a fresh repo.\n"
+            f"  {result.stderr.strip()}\n"
+            "  Abort this run, or fix access and re-run."
+        )
+        return False
+
+    # 克隆下来的内容随后会被 deployer 用 public 目录整体覆盖，这里只需要 .git
+    for entry in os.listdir(deploy_dir):
+        if entry == ".git":
+            continue
+        target = os.path.join(deploy_dir, entry)
+        shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
+    return True
+
 def create_deploy_workspace(base_dir):
     """在临时目录按各站点 HEAD 创建干净 worktree，未提交/未跟踪内容不会参与构建"""
     workspace = tempfile.mkdtemp(prefix="iliyian-deploy-")
@@ -127,8 +206,11 @@ def create_deploy_workspace(base_dir):
                 os.symlink(node_modules, os.path.join(dst, "node_modules"))
 
             # hexo-deployer-git 在 base_dir/.deploy_git 里保存 gh-pages 历史，
-            # 持久化到真实站点目录，避免临时工作区销毁时丢失部署历史
+            # 持久化到真实站点目录，避免临时工作区销毁时丢失部署历史。
+            # 缺失时先补齐，否则 deployer 会新建仓库并用 --force 覆盖远端历史。
             deploy_git = os.path.join(src, ".deploy_git")
+            if not ensure_deploy_history(src):
+                raise SystemExit(f"Refusing to deploy {site}: deployment history is missing and could not be restored")
             if os.path.isdir(deploy_git):
                 os.symlink(deploy_git, os.path.join(dst, ".deploy_git"))
 
