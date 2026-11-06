@@ -4,3 +4,4 @@ __pycache__/
 meting-api
 .claude
 .playwright-mcp/
+.venv/
