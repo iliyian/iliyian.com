@@ -81,6 +81,8 @@ def build_safety_charset():
     chars.update(chr(c) for c in range(0x2460, 0x2500))    # 带圈数字 ①②③…
     chars.update(chr(c) for c in range(0x2600, 0x2700))    # 常用杂项符号（☀ ★ …）
     chars.update(chr(c) for c in range(0xFF00, 0xFFF0))    # 全角字符（，。！？（））
+    # JS 注入的界面文案不在 public HTML 里，需显式兜底（如加密文章的封缄卡）
+    chars.update("此页已封缄密码显示隐藏解安全上下文无法解密需本机地址访问当前页面不是")  # /js/hbe-enhance.js
     return chars
 
 
