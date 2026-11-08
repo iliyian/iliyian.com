@@ -6,16 +6,14 @@
 
 流程：
 1. 扫描 blogxyz/public、blogxyz-en/public 中渲染后的 HTML/XML 原始文本
-   （包含内联脚本里的轮播诗句、文章标题、导航、meta 等）；Maple Mono
-   额外扫描英文站的 CSS/JS，覆盖 Live2D 等运行时文案里的符号；
+   （包含内联脚本里的轮播诗句、文章标题、导航、meta 等）；
 2. 从 HTML 的 #page-header / #nav / #site-info / #post-info 中提取“首屏标题区”
    字符，生成一个更小的 screen 字体，并通过 CSS 优先用于导航和页头；
 3. 合并安全字符集（ASCII、CJK 标点、全角符号、带圈数字、Latin-1 补充等），
    为评论、Live2D、音乐播放器等动态内容兜底；
-4. 用 fontTools 将原始字体（从 R2 下载到内存，不落盘）裁剪为三个 woff2：
+4. 用 fontTools 将原始字体（从 R2 下载到内存，不落盘）裁剪为两个 woff2：
    - LXGWWenKai-Medium.subset.woff2：全站静态内容
    - LXGWWenKai-Screen.woff2：页头/导航/文章标题等首屏文字
-   - MapleMono.subset.woff2：英文站正文（仅英文站 CSS 引用）
 5. 输出到 blogxyz/source/fonts/（下次 hexo generate 自动拷入 public）和
    blogxyz/public/fonts/（本次构建的 public 已生成，直接覆盖使其立即可用）。
 """
@@ -36,17 +34,16 @@ from fontTools.ttLib import TTFont
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 FONT_SRC_URL = "https://r2-imgs.iliyian.com/css/LXGWWenKai-Medium.ttf"
-MAPLE_FONT_SRC_URL = "https://r2-imgs.iliyian.com/css/MapleMonoNormal-Medium.ttf"
 
 # 输出文件名
 GLOBAL_FONT_NAME = "LXGWWenKai-Medium.subset.woff2"
 SCREEN_FONT_NAME = "LXGWWenKai-Screen.woff2"
-MAPLE_FONT_NAME = "MapleMono.subset.woff2"
 
 # 扫描的文本来源目录（public 需先由 hexo generate 生成）
-CN_PUBLIC = os.path.join(BASE_DIR, "blogxyz", "public")
-EN_PUBLIC = os.path.join(BASE_DIR, "blogxyz-en", "public")
-SCAN_DIRS = [CN_PUBLIC, EN_PUBLIC]
+SCAN_DIRS = [
+    os.path.join(BASE_DIR, "blogxyz", "public"),
+    os.path.join(BASE_DIR, "blogxyz-en", "public"),
+]
 
 # 只扫描渲染后的 HTML/XML 原始文本；内联脚本会带入轮播诗句等动态文案
 TEXT_EXTS = {".html", ".htm", ".xml"}
@@ -89,22 +86,21 @@ def build_safety_charset():
     return chars
 
 
-def iter_public_files(dirs=None, exts=None):
-    """遍历指定 public 目录下的文本文件；默认遍历两个站的 HTML/XML。"""
-    exts = TEXT_EXTS if exts is None else exts
-    for d in (SCAN_DIRS if dirs is None else dirs):
+def iter_public_files():
+    """遍历两个站 public 下的 HTML/XML。"""
+    for d in SCAN_DIRS:
         if not os.path.isdir(d):
             continue
         for root, _dirs, files in os.walk(d):
             for f in files:
-                if os.path.splitext(f)[1].lower() in exts:
+                if os.path.splitext(f)[1].lower() in TEXT_EXTS:
                     yield os.path.join(root, f)
 
 
-def collect_chars(dirs=None, exts=None):
-    """收集渲染后 public 文本中出现的字符。"""
+def collect_chars():
+    """收集渲染后 public HTML/XML 原始文本中出现的字符。"""
     chars = set()
-    for path in iter_public_files(dirs, exts):
+    for path in iter_public_files():
         try:
             if os.path.getsize(path) > MAX_FILE_SIZE:
                 continue
@@ -274,23 +270,6 @@ def main():
         size, missing = build_font(src, chars, out_name)
         print(f"  体积: {src_kb / 1024:.1f} MB -> {size / 1024:.0f} KB"
               + (f"，缺字 {missing}" if missing else "，无缺字"))
-
-    # 英文站正文使用 Maple Mono，只按英文站字符裁剪；文件放在共享的
-    # /fonts/ 下，但中文站 CSS 不引用它，因此不会产生额外下载。
-    # CSS/JS 也要扫：Live2D 等运行时文案里的符号不在 HTML 里（如 ∞）。
-    if os.path.isdir(EN_PUBLIC):
-        en_chars = collect_chars(
-            [EN_PUBLIC], TEXT_EXTS | {".css", ".js"}
-        ) | build_safety_charset()
-        print(f"英文站字符: {len(en_chars)}（含安全字符集）")
-        maple_src = fetch_font(MAPLE_FONT_SRC_URL)
-        size, missing = build_font(maple_src, en_chars, MAPLE_FONT_NAME)
-        print(f"  体积: {len(maple_src) / 1024:.1f} KB -> {size / 1024:.0f} KB"
-              + (f"，缺字 {missing}" if missing else "，无缺字"))
-        if missing:
-            print("  注: Maple Mono 不含 CJK 字形，英文站中的中文会回退到系统字体（预期）")
-    else:
-        print("未找到 blogxyz-en/public，跳过 Maple Mono 子集")
 
 
 if __name__ == "__main__":
