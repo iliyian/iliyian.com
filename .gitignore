@@ -5,3 +5,4 @@ meting-api
 .claude
 .playwright-mcp/
 .venv/
+.worktrees
