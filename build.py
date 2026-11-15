@@ -12,6 +12,7 @@ SITES = ["blogxyz", "blogxyz-en"]
 BUILD_FILES = [
     "subset_fontawesome.py",
     "precompute_cover_colors.py",
+    "precompute_recommend.py",
     "subset_fonts.py",
 ]
 
@@ -23,10 +24,11 @@ def ensure_python_deps():
     try:
         import brotli  # noqa: F401
         import fontTools  # noqa: F401
+        import yaml  # noqa: F401
         from PIL import Image  # noqa: F401
     except ImportError:
-        print("Installing dependencies (fonttools, brotli, pillow)...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fonttools", "brotli", "pillow"])
+        print("Installing dependencies (fonttools, brotli, pillow, pyyaml)...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "fonttools", "brotli", "pillow", "pyyaml"])
 
 def run_command(command, cwd):
     print(f"Running command: {command} in {cwd}")
@@ -256,6 +258,12 @@ def build_site(base_dir):
 
     # 0. Subset FontAwesome icons from scanned source (must run before hexo generate)
     run_command("python subset_fontawesome.py", base_dir)
+
+    # 0.5 预计算 embedding 相关推荐（在线模型不可用时不影响站点构建）
+    try:
+        run_command("python precompute_recommend.py", base_dir)
+    except subprocess.CalledProcessError as exc:
+        print(f"Warning: recommendation precompute failed ({exc}); continuing without recommendations")
 
     # 1. Build Chinese version (blogxyz)
     build_hexo(cn_path)
