@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""预计算 embedding 相关推荐（AxonHub / OpenRouter 在线模型）。
+"""预计算 embedding 相关推荐（OpenAI 兼容在线模型）。
 
-扫描两个站点的 source/_posts，调用 AxonHub 的 OpenAI 兼容 /v1/embeddings
-接口（默认 qwen/qwen3-embedding-8b，整篇不切块），计算余弦相似度，按 MMR 去重后为每篇
+扫描两个站点的 source/_posts，调用 OpenAI 兼容的 /v1/embeddings 接口
+（默认 qwen/qwen3-embedding-8b，整篇不切块），计算余弦相似度，按 MMR 去重后为每篇
 文章选 TOP_N 篇相关文章，写入各站点的 source/_data/recommend.json。
 
 构建时由 scripts/embedding-recommend.js 读取并注入文章页；CF Pages 上
 build.py 会自动调用本脚本，因此不需要提交生成的 JSON。
 
-环境变量（优先 OPENAI_*，兼容 AXONHUB_*）：
-    OPENAI_BASE_URL     默认 https://axon.iliyian.com/v1
-    OPENAI_API_KEY      AxonHub API key；本地缺省时读取
-                        /root/.openclaw/secrets/axon-api-key.txt
+环境变量：
+    OPENAI_BASE_URL     默认 https://api.openai.com/v1
+    OPENAI_API_KEY      API key
     OPENAI_EMBED_MODEL  默认 qwen/qwen3-embedding-8b
     OPENAI_EMBED_DIM    默认按模型自动（Qwen 4096 / 3-small 1536）
     OPENAI_EMBED_FULL_TEXT 默认 1：整篇正文不切块、不限长；设为 0 回退切块
@@ -63,10 +62,10 @@ def env_any(*names, default=""):
     return default
 
 
-API_BASE = env_any("OPENAI_BASE_URL", "AXONHUB_BASE_URL", default="https://axon.iliyian.com/v1").rstrip("/")
-API_KEY = env_any("OPENAI_API_KEY", "AXONHUB_API_KEY")
-MODEL = env_any("OPENAI_EMBED_MODEL", "AXONHUB_EMBED_MODEL", default="qwen/qwen3-embedding-8b")
-FULL_TEXT = env_any("OPENAI_EMBED_FULL_TEXT", "AXONHUB_EMBED_FULL_TEXT", default="1").lower() not in ("0", "false", "no", "off")
+API_BASE = env_any("OPENAI_BASE_URL", default="https://api.openai.com/v1").rstrip("/")
+API_KEY = env_any("OPENAI_API_KEY")
+MODEL = env_any("OPENAI_EMBED_MODEL", default="qwen/qwen3-embedding-8b")
+FULL_TEXT = env_any("OPENAI_EMBED_FULL_TEXT", default="1").lower() not in ("0", "false", "no", "off")
 
 
 def default_dim_for_model(model):
@@ -80,11 +79,11 @@ def default_dim_for_model(model):
     return 0
 
 
-_dim_env = env_any("OPENAI_EMBED_DIM", "AXONHUB_EMBED_DIM")
+_dim_env = env_any("OPENAI_EMBED_DIM")
 EMBED_DIM = int(_dim_env) if _dim_env else default_dim_for_model(MODEL)
-BATCH_SIZE = max(1, int(env_any("OPENAI_EMBED_BATCH", "AXONHUB_EMBED_BATCH", default="64")))
-WORKERS = max(1, int(env_any("OPENAI_EMBED_WORKERS", "AXONHUB_EMBED_WORKERS", default="4")))
-FULL_WORKERS = max(1, int(env_any("OPENAI_EMBED_FULL_WORKERS", "AXONHUB_EMBED_FULL_WORKERS", default="6")))
+BATCH_SIZE = max(1, int(env_any("OPENAI_EMBED_BATCH", default="64")))
+WORKERS = max(1, int(env_any("OPENAI_EMBED_WORKERS", default="4")))
+FULL_WORKERS = max(1, int(env_any("OPENAI_EMBED_FULL_WORKERS", default="6")))
 
 
 def log(msg):
@@ -95,15 +94,7 @@ def load_api_key():
     global API_KEY
     if API_KEY:
         return API_KEY
-    key_file = "/root/.openclaw/secrets/axon-api-key.txt"
-    if os.path.exists(key_file):
-        with open(key_file, encoding="utf-8") as fp:
-            API_KEY = fp.read().strip()
-    if not API_KEY:
-        raise SystemExit(
-            "OPENAI_API_KEY / AXONHUB_API_KEY is not set and the local key file is unavailable"
-        )
-    return API_KEY
+    raise SystemExit("OPENAI_API_KEY is not set")
 
 
 def parse_post(filepath):
@@ -254,7 +245,7 @@ def embed_batch(batch):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        # 公网 axon.iliyian.com 会拦 Python 默认 UA（Cloudflare 1010）
+        # 部分网关会拦 Python 默认 UA（Cloudflare 1010）
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120 Safari/537.36",
     }
@@ -278,7 +269,7 @@ def embed_batch(batch):
 
 
 def embed_texts(texts, batch_size=None, workers=None):
-    """并发调用 AxonHub 批量生成向量，返回与输入顺序一致的 float 列表。"""
+    """并发调用 embedding 接口批量生成向量，返回与输入顺序一致的 float 列表。"""
     bs = max(1, batch_size or BATCH_SIZE)
     wk = max(1, workers or WORKERS)
     total = len(texts)
@@ -455,7 +446,7 @@ def build_site(site_name, config):
 
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     payload = {
-        "provider": "axonhub",
+        "provider": "openai-compatible",
         "model": MODEL,
         "dim": dim,
         "generated": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
