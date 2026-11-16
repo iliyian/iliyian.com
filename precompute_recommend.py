@@ -45,7 +45,7 @@ SITES = {
     "blogxyz-en": {"label": "Related Posts"},
 }
 
-TOP_N = 6
+TOP_N = 2
 MMR_LAMBDA = 1.0
 META_WEIGHT = 0.45
 BODY_WEIGHT = 0.55
