@@ -17,7 +17,7 @@ BUILD_FILES = [
 ]
 
 # 独立页面属于部署内容，--deploy 时从根仓库 HEAD 取，避免带上未提交改动
-STANDALONE_PAGES = ["cn-visitors.html"]
+STANDALONE_PAGES = ["sorry.html"]
 
 def ensure_python_deps():
     """确保字体子集化/封面取色依赖可用（Netlify 等 CI 环境为全新 Python）"""
@@ -293,7 +293,7 @@ def build_site(base_dir):
     run_command("python subset_fontawesome.py --verify", base_dir)
 
     # 5. Copy standalone pages to public directory
-    for page in ["cn-visitors.html"]:
+    for page in ["sorry.html"]:
         src = os.path.join(base_dir, page)
         dst = os.path.join(cn_path, "public", page)
         if os.path.exists(src):
