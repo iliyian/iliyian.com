@@ -64,7 +64,6 @@ jobs:
             '  *iliyian/iliyian.github.io*) file=gh-pages-token ;;' \
             '  *) file=source-token ;;' \
             'esac' \
-            'printf "%s -> %s\\n" "$target" "$file" >> "$RUNNER_TEMP/cred.log"' \
             'printf "username=x-access-token\\npassword=%s\\n" "$(cat "$RUNNER_TEMP/$file")"' \
             > "$RUNNER_TEMP/git-credential-gh-pages"
           chmod 700 "$RUNNER_TEMP/git-credential-gh-pages"
@@ -82,6 +81,6 @@ jobs:
       - name: Build and deploy
         run: python build.py --deploy
 
-      - name: Credential routing log
+      - name: Remove credentials
         if: always()
-        run: cat "$RUNNER_TEMP/cred.log" 2>/dev/null || true
+        run: rm -f "$RUNNER_TEMP/gh-pages-token" "$RUNNER_TEMP/source-token" "$RUNNER_TEMP/git-credential-gh-pages"
