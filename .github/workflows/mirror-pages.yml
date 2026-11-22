@@ -24,6 +24,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+          # The blog submodules are private; the default GITHUB_TOKEN only
+          # covers this repository. The PAT carries read access to all three.
+          token: ${{ secrets.GH_PAGES_DEPLOY_KEY }}
 
       - uses: actions/setup-node@v4
         with:
