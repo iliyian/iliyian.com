@@ -15,10 +15,13 @@
    - LXGWWenKai-Medium.subset.woff2：全站静态内容
    - LXGWWenKai-Screen.woff2：页头/导航/文章标题等首屏文字
 5. 输出到 blogxyz/source/fonts/（下次 hexo generate 自动拷入 public）和
-   blogxyz/public/fonts/（本次构建的 public 已生成，直接覆盖使其立即可用）。
+   blogxyz/public/fonts/（本次构建的 public 已生成，直接覆盖使其立即可用）；
+6. 按字体内容计算哈希，给 public 中 HTML 的 preload 和 CSS 的 @font-face
+   字体 URL 追加 ?v=<hash>，字体更新后浏览器/CDN 立即拉新，未更新时稳定命中缓存。
 """
 
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -56,6 +59,10 @@ OUTPUT_DIRS = [
     os.path.join(BASE_DIR, "blogxyz", "source", "fonts"),
     os.path.join(BASE_DIR, "blogxyz", "public", "fonts"),
 ]
+
+# 需要回写字体版本参数的构建产物
+CN_PUBLIC_DIR = os.path.join(BASE_DIR, "blogxyz", "public")
+VERSION_EXTS = {".html", ".htm", ".css"}
 
 # 首屏字体额外保留的标点（页头可能出现的动态日期/数字等）
 SCREEN_SAFETY = set(chr(c) for c in range(0x20, 0x7F))
@@ -249,6 +256,49 @@ def build_font(src_data, chars, out_name):
     return size, len(missing)
 
 
+def file_version(path):
+    """返回文件内容的短哈希，用作查询串版本号。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:8]
+
+
+def version_font_urls(root, versions):
+    """给构建产物中的字体 URL 追加 ?v=<hash>。
+
+    同时覆盖 HTML 里的 preload 和 CSS 里的 @font-face，二者必须使用
+    完全相同的 URL，否则浏览器会重复下载字体。重复执行结果不变。
+    """
+    replacements = [
+        (
+            re.compile(re.escape(f"/fonts/{name}") + r"(?:\?v=[0-9a-f]+)?"),
+            f"/fonts/{name}?v={digest}",
+        )
+        for name, digest in versions.items()
+    ]
+    changed = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            if os.path.splitext(filename)[1].lower() not in VERSION_EXTS:
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, "r", encoding="utf-8", newline="") as fp:
+                    text = fp.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            new_text = text
+            for pattern, url in replacements:
+                new_text = pattern.sub(lambda _m, u=url: u, new_text)
+            if new_text != text:
+                with open(path, "w", encoding="utf-8", newline="") as fp:
+                    fp.write(new_text)
+                changed += 1
+    return changed
+
+
 def main():
     if not any(os.path.isdir(d) for d in SCAN_DIRS) or not any(True for _ in iter_public_files()):
         print("未找到 public HTML/XML，请先运行 hexo generate 生成站点。")
@@ -270,6 +320,15 @@ def main():
         size, missing = build_font(src, chars, out_name)
         print(f"  体积: {src_kb / 1024:.1f} MB -> {size / 1024:.0f} KB"
               + (f"，缺字 {missing}" if missing else "，无缺字"))
+
+    versions = {
+        name: file_version(os.path.join(OUTPUT_DIRS[1], name))
+        for name in (GLOBAL_FONT_NAME, SCREEN_FONT_NAME)
+    }
+    for name, digest in versions.items():
+        print(f"  版本: {name} -> {digest}")
+    changed = version_font_urls(CN_PUBLIC_DIR, versions)
+    print(f"字体 URL 版本化: {changed} 个文件")
 
 
 if __name__ == "__main__":
