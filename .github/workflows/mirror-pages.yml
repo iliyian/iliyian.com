@@ -1,0 +1,53 @@
+name: Mirror to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The only write permission GitHub needs to grant this workflow: read this repo.
+# The push to iliyian.github.io is authenticated by the PAT in
+# secrets.GH_PAGES_DEPLOY_KEY, which is scoped to that repository alone.
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-pages
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyyaml
+
+      # build.py --deploy pushes over SSH (git@github.com:...). Rewrite that to
+      # HTTPS and let the git credential helper supply the PAT, so the token
+      # never appears in a command line or in a URL printed by git.
+      - name: Configure git credentials
+        env:
+          GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_DEPLOY_KEY }}
+        run: |
+          test -n "$GH_PAGES_TOKEN" || { echo "::error::GH_PAGES_DEPLOY_KEY is empty"; exit 1; }
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git config --global credential.helper store
+          printf 'https://x-access-token:%s@github.com\n' "$GH_PAGES_TOKEN" > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+
+      - name: Build and deploy
+        run: python build.py --deploy
