@@ -59,9 +59,12 @@ jobs:
             '  *github.com/iliyian/iliyian.github.io*) file=gh-pages-token ;;' \
             '  *) file=source-token ;;' \
             'esac' \
+            'printf "%s %s\\n" "$url" "$file" >> "$RUNNER_TEMP/cred.log"' \
             'printf "username=x-access-token\\npassword=%s\\n" "$(cat "$RUNNER_TEMP/$file")"' \
             > "$RUNNER_TEMP/git-credential-gh-pages"
           chmod 700 "$RUNNER_TEMP/git-credential-gh-pages"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git config --global credential.helper "$RUNNER_TEMP/git-credential-gh-pages"
 
@@ -70,3 +73,7 @@ jobs:
 
       - name: Build and deploy
         run: python build.py --deploy
+
+      - name: Credential routing log
+        if: always()
+        run: cat "$RUNNER_TEMP/cred.log" 2>/dev/null || true
