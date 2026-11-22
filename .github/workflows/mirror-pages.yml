@@ -5,9 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# The only write permission GitHub needs to grant this workflow: read this repo.
-# The push to iliyian.github.io is authenticated by the PAT in
-# secrets.GH_PAGES_DEPLOY_KEY, which is scoped to that repository alone.
 permissions:
   contents: read
 
@@ -22,11 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
-          # The blog submodules are private; the default GITHUB_TOKEN only
-          # covers this repository. The PAT carries read access to all three.
-          token: ${{ secrets.GH_PAGES_DEPLOY_KEY }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -39,18 +33,40 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt pyyaml
 
-      # build.py --deploy pushes over SSH (git@github.com:...). Rewrite that to
-      # HTTPS and let the git credential helper supply the PAT, so the token
-      # never appears in a command line or in a URL printed by git.
+      # Two credentials are in play:
+      #   BLOG_SOURCE_TOKEN       read-only on the private blog submodules
+      #   GH_PAGES_DEPLOY_KEY     write on iliyian.github.io
+      # A credential helper routes github.com URLs to the right token by path.
       - name: Configure git credentials
         env:
           GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_DEPLOY_KEY }}
+          SOURCE_TOKEN: ${{ secrets.BLOG_SOURCE_TOKEN }}
         run: |
+          set -euo pipefail
           test -n "$GH_PAGES_TOKEN" || { echo "::error::GH_PAGES_DEPLOY_KEY is empty"; exit 1; }
+          test -n "$SOURCE_TOKEN" || { echo "::error::BLOG_SOURCE_TOKEN is empty"; exit 1; }
+          umask 077
+          printf '%s' "$GH_PAGES_TOKEN" > "$RUNNER_TEMP/gh-pages-token"
+          printf '%s' "$SOURCE_TOKEN" > "$RUNNER_TEMP/source-token"
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            '[ "${1:-}" = "get" ] || exit 0' \
+            'url=""' \
+            'while IFS="=" read -r key value; do' \
+            '  [ "$key" = "url" ] && url="$value"' \
+            'done' \
+            'case "$url" in' \
+            '  *github.com/iliyian/iliyian.github.io*) file=gh-pages-token ;;' \
+            '  *) file=source-token ;;' \
+            'esac' \
+            'printf "username=x-access-token\\npassword=%s\\n" "$(cat "$RUNNER_TEMP/$file")"' \
+            > "$RUNNER_TEMP/git-credential-gh-pages"
+          chmod 700 "$RUNNER_TEMP/git-credential-gh-pages"
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git config --global credential.helper store
-          printf 'https://x-access-token:%s@github.com\n' "$GH_PAGES_TOKEN" > "$HOME/.git-credentials"
-          chmod 600 "$HOME/.git-credentials"
+          git config --global credential.helper "$RUNNER_TEMP/git-credential-gh-pages"
+
+      - name: Checkout private submodules
+        run: git submodule update --init --recursive
 
       - name: Build and deploy
         run: python build.py --deploy
