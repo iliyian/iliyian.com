@@ -101,6 +101,45 @@ def _dominant_color(image):
     return _tune(rgb[0], rgb[1], rgb[2])
 
 
+def _srgb_linear(value):
+    value /= 255.0
+    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+
+def _bottom_tone(image, ratio=math.sqrt(2), sample=32):
+    """按卡片封面 cover 裁切后底部 25% 的平均亮度判断用黑字还是白字。"""
+    image = image.convert("RGBA")
+    width, height = image.size
+    if not width or not height:
+        return None
+    source_ratio = width / height
+    if source_ratio > ratio:
+        crop_w = height * ratio
+        left = (width - crop_w) / 2
+        box = (round(left), 0, round(left + crop_w), height)
+    else:
+        crop_h = width / ratio
+        top = (height - crop_h) / 2
+        box = (0, round(top), width, round(top + crop_h))
+    image = image.crop(box).resize((sample, sample), Image.Resampling.BICUBIC)
+    raw = image.tobytes()
+    start = int(sample * 0.75) * sample * 4
+    values = []
+    for i in range(start, len(raw), 4):
+        r, g, b, a = raw[i], raw[i + 1], raw[i + 2], raw[i + 3]
+        if a < 16:
+            continue
+        values.append(
+            0.2126 * _srgb_linear(r)
+            + 0.7152 * _srgb_linear(g)
+            + 0.0722 * _srgb_linear(b)
+        )
+    if not values:
+        return None
+    values.sort()
+    return "light" if values[int(len(values) * 0.75)] >= 0.60 else "dark"
+
+
 def _extract_urls(html):
     urls = set()
     # filter 会在卡片/头图上写入原始封面 URL
@@ -168,10 +207,14 @@ def _collect_urls():
     return {u for u in urls if _is_cover(u)}
 
 
-def _write_map(colors):
+def _write_map(colors, tones):
     payload = 'window.__COVER_COLORS=' + json.dumps(
         {k: colors[k] for k in sorted(colors)}, ensure_ascii=False, separators=(',', ':')
     ) + ';\n'
+    if tones:
+        payload += 'window.__COVER_TONES=' + json.dumps(
+            {k: tones[k] for k in sorted(tones)}, ensure_ascii=False, separators=(',', ':')
+        ) + ';\n'
     targets = [
         os.path.join(CN_PUBLIC, 'js', 'cover-colors.js'),
         os.path.join(CN_PUBLIC, 'en', 'js', 'cover-colors.js'),
@@ -189,11 +232,14 @@ def main():
     urls = _collect_urls()
     print(f"[cover-colors] {len(urls)} cover URLs")
     colors = {}
+    tones = {}
     if Image is not None:
         for i, url in enumerate(sorted(urls), 1):
             try:
                 data = _fetch_thumb(url)
-                rgb = _dominant_color(Image.open(io.BytesIO(data)))
+                image = Image.open(io.BytesIO(data))
+                rgb = _dominant_color(image)
+                tone = _bottom_tone(image)
             except Exception as exc:  # 单张失败不影响构建
                 print(f"[cover-colors] skip {url}: {exc}")
                 continue
@@ -202,10 +248,14 @@ def main():
             decoded = urllib.parse.unquote(url)
             if decoded != url:
                 colors[decoded] = rgb
+            if tone:
+                tones[url] = tone
+                if decoded != url:
+                    tones[decoded] = tone
             if i % 20 == 0:
                 print(f"[cover-colors] {i}/{len(urls)}")
-    _write_map(colors)
-    print(f"[cover-colors] done: {len(colors)} entries")
+    _write_map(colors, tones)
+    print(f"[cover-colors] done: {len(colors)} colors, {len(tones)} tones")
     return 0
 
 
