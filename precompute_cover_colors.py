@@ -3,6 +3,7 @@
 
 构建流程中在 CN/EN 合并后调用；不缓存，每次构建重新计算。
 """
+import hashlib
 import io
 import json
 import math
@@ -228,6 +229,41 @@ def _write_map(colors, tones):
         print(f"[cover-colors] wrote {path}")
 
 
+def _version_cover_colors_urls(root):
+    """给构建产物里的 /js/cover-colors.js 追加 ?v=<hash>。
+
+    这个文件每次构建都会变（主色 + 明暗表），但文件名固定；不更新查询串
+    的话，浏览器/边缘节点会按 max-age 继续用旧文件——线上曾因此出现
+    “明暗表已部署、页面却还在用白字”的问题。重复执行结果不变。
+    """
+    asset = os.path.join(CN_PUBLIC, 'js', 'cover-colors.js')
+    if not os.path.isfile(asset):
+        return 0
+    digest = hashlib.sha256()
+    with open(asset, 'rb') as fp:
+        for chunk in iter(lambda: fp.read(1024 * 1024), b''):
+            digest.update(chunk)
+    url = f"/js/cover-colors.js?v={digest.hexdigest()[:8]}"
+    pattern = re.compile(r"/js/cover-colors\.js(?:\?v=[0-9a-f]+)?")
+    changed = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            if not filename.lower().endswith('.html'):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, 'r', encoding='utf-8', newline='') as fp:
+                    text = fp.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            new_text = pattern.sub(url, text)
+            if new_text != text:
+                with open(path, 'w', encoding='utf-8', newline='') as fp:
+                    fp.write(new_text)
+                changed += 1
+    return changed
+
+
 def main():
     urls = _collect_urls()
     print(f"[cover-colors] {len(urls)} cover URLs")
@@ -255,6 +291,9 @@ def main():
             if i % 20 == 0:
                 print(f"[cover-colors] {i}/{len(urls)}")
     _write_map(colors, tones)
+    changed = _version_cover_colors_urls(CN_PUBLIC)
+    changed += _version_cover_colors_urls(EN_PUBLIC)
+    print(f"[cover-colors] versioned cover-colors.js in {changed} HTML files")
     print(f"[cover-colors] done: {len(colors)} colors, {len(tones)} tones")
     return 0
 
