@@ -3,6 +3,7 @@
 
 构建流程中在 CN/EN 合并后调用；不缓存，每次构建重新计算。
 """
+import argparse
 import hashlib
 import io
 import json
@@ -141,6 +142,251 @@ def _bottom_tone(image, ratio=math.sqrt(2), sample=32):
     return "light" if values[int(len(values) * 0.75)] >= 0.60 else "dark"
 
 
+# 移动端卡片在 390px 视口下的文字区域（封面坐标归一化）
+CARD_FONT_PX = 23.595          # CN 标题字号
+CARD_FONT_PX_EN = 22.88         # EN 标题字号（系统字体）
+CARD_PAD_X = 20.0
+CARD_COVER_W = 372.0
+CARD_COVER_H = 263.039
+CARD_TITLE_BOTTOM = 0.7920
+CARD_TITLE_LINE_H = 31.0
+CARD_META_RECT = (0.5355, 0.8377, 0.4107, 0.0741)
+CARD_META_RECT_EN = (0.5449, 0.8377, 0.4013, 0.0741)
+
+TITLE_TEXT = {
+    "white": (255, 255, 255, 1.0),
+    "dark": (26, 26, 26, 1.0),
+}
+META_TEXT = {
+    "white": (255, 255, 255, 0.85),
+    "dark": (0, 0, 0, 0.72),
+}
+
+
+def _char_em_fallback(ch):
+    """字体里缺字时的粗略宽度（em）：CJK 1，全角标点 1，拉丁按比例。"""
+    code = ord(ch)
+    if (0x2E80 <= code <= 0x9FFF or 0x3040 <= code <= 0x30FF
+            or 0xF900 <= code <= 0xFAFF or 0xFF00 <= code <= 0xFFEF
+            or 0x3000 <= code <= 0x303F):
+        return 1.0
+    if ch == " ":
+        return 0.5
+    if ch in ".·…":
+        return 0.35
+    if ch.isupper():
+        return 0.59
+    if ch.isdigit():
+        return 0.55
+    if ch.isalpha():
+        return 0.52
+    return 0.55
+
+
+_TITLE_FONT_PATH = os.path.join(BASE_DIR, "blogxyz", "source", "fonts", "LXGWWenKai-Medium.subset.woff2")
+_title_advance = None
+_title_font_loaded = False
+
+
+def _load_title_font():
+    """读构建产物里的标题字体，返回按像素取 advance 的函数；失败返回 None。"""
+    global _title_advance, _title_font_loaded
+    if _title_font_loaded:
+        return _title_advance
+    _title_font_loaded = True
+    try:
+        from fontTools.ttLib import TTFont
+        font = TTFont(_TITLE_FONT_PATH)
+        cmap = font.getBestCmap()
+        upm = font["head"].unitsPerEm
+        metrics = font["hmtx"].metrics
+
+        def advance_px(ch):
+            glyph = cmap.get(ord(ch))
+            if not glyph:
+                return None
+            advance = metrics.get(glyph)
+            return advance[0] * CARD_FONT_PX / upm if advance else None
+
+        _title_advance = advance_px
+    except Exception:
+        _title_advance = None
+    return _title_advance
+
+
+def _title_width_px(title, use_font=True):
+    advance = _load_title_font() if use_font else None
+    base_px = CARD_FONT_PX if use_font else CARD_FONT_PX_EN
+    total = 0.0
+    for ch in title:
+        px = advance(ch) if advance else None
+        total += px if px is not None else _char_em_fallback(ch) * base_px
+    return total
+
+
+def _title_rect(title, use_font=True):
+    """标题右对齐、右边界固定；CN 用字体 advance，EN 用字符比例估算。"""
+    avail = CARD_COVER_W - 2 * CARD_PAD_X
+    width = min(_title_width_px(title, use_font), avail)
+    lines = min(2, max(1, math.ceil(width / avail)))
+    right = (CARD_COVER_W - CARD_PAD_X) / CARD_COVER_W
+    height = lines * CARD_TITLE_LINE_H / CARD_COVER_H
+    return (
+        right - width / CARD_COVER_W,
+        CARD_TITLE_BOTTOM - height,
+        width / CARD_COVER_W,
+        height,
+    )
+
+
+def _cover_crop(image, ratio=math.sqrt(2)):
+    image = image.convert("RGBA")
+    width, height = image.size
+    if not width or not height:
+        return None
+    source_ratio = width / height
+    if source_ratio > ratio:
+        crop_w = height * ratio
+        left = (width - crop_w) / 2
+        box = (round(left), 0, round(left + crop_w), height)
+    else:
+        crop_h = width / ratio
+        top = (height - crop_h) / 2
+        box = (0, round(top), width, round(top + crop_h))
+    return image.crop(box)
+
+
+def _region_pixels(cropped, rect):
+    width, height = cropped.size
+    x0 = max(0, int(round(rect[0] * width)))
+    y0 = max(0, int(round(rect[1] * height)))
+    x1 = min(width, int(round((rect[0] + rect[2]) * width)))
+    y1 = min(height, int(round((rect[1] + rect[3]) * height)))
+    pixels = []
+    load = cropped.load()
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b, a = load[x, y]
+            if a >= 16:
+                pixels.append((r, g, b))
+    return pixels
+
+
+def _contrast_l(l1, l2):
+    hi, lo = (l1, l2) if l1 >= l2 else (l2, l1)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _tone_for_text(pixels, white, dark):
+    """按区域内像素的中位对比度，在白字和深字之间选更优的一侧。"""
+    if not pixels:
+        return None
+    white_cr = []
+    dark_cr = []
+    for r, g, b in pixels:
+        bg = 0.2126 * _srgb_linear(r) + 0.7152 * _srgb_linear(g) + 0.0722 * _srgb_linear(b)
+        for spec, out in ((white, white_cr), (dark, dark_cr)):
+            sr, sg, sb, alpha = spec
+            er = alpha * sr + (1 - alpha) * r
+            eg = alpha * sg + (1 - alpha) * g
+            eb = alpha * sb + (1 - alpha) * b
+            fg = 0.2126 * _srgb_linear(er) + 0.7152 * _srgb_linear(eg) + 0.0722 * _srgb_linear(eb)
+            out.append(_contrast_l(fg, bg))
+    white_cr.sort()
+    dark_cr.sort()
+    return "light" if dark_cr[len(dark_cr) // 2] >= white_cr[len(white_cr) // 2] else "dark"
+
+
+def _text_tones(image, title, use_font=True):
+    """标题按估算行盒、日期按固定行盒，各自选择字色。"""
+    cropped = _cover_crop(image)
+    if cropped is None:
+        return None
+    tones = {}
+    title_tone = _tone_for_text(
+        _region_pixels(cropped, _title_rect(title, use_font)),
+        TITLE_TEXT["white"], TITLE_TEXT["dark"])
+    meta_rect = CARD_META_RECT if use_font else CARD_META_RECT_EN
+    meta_tone = _tone_for_text(_region_pixels(cropped, meta_rect), META_TEXT["white"], META_TEXT["dark"])
+    if title_tone:
+        tones["title"] = title_tone
+    if meta_tone:
+        tones["meta"] = meta_tone
+    return tones or None
+
+
+def _cards_from_html(html):
+    """遍历首页卡片，产出 (封面 URL, 标题文字)。"""
+    starts = [m.start() for m in re.finditer(r'<div class="recent-post-item"', html)]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else min(len(html), start + 20000)
+        block = html[start:end]
+        cover_m = re.search(r'data-cover-src="([^"]*)"', block)
+        title_m = re.search(r'<a[^>]*class="article-title"[^>]*>(.*?)</a>', block, re.S)
+        if not cover_m or not title_m:
+            continue
+        inner = re.sub(r'<span[^>]*class="sticky"[^>]*>.*?</span>', '', title_m.group(1), flags=re.S)
+        title = re.sub(r'<[^>]+>', '', inner)
+        title = re.sub(r'\s+', ' ', unescape(title)).strip()
+        url = unescape(cover_m.group(1)).strip("'\"")
+        if title and url:
+            yield url, title
+
+
+def _collect_card_titles(site_root, skip_en=False):
+    """从构建后的 HTML 里取首页卡片的封面 URL 和标题文字。"""
+    titles = {}
+    if not os.path.isdir(site_root):
+        return titles
+    en_root = os.path.abspath(os.path.join(site_root, "en")) if skip_en else None
+    for root, _dirs, files in os.walk(site_root):
+        if en_root and os.path.abspath(root).startswith(en_root):
+            continue
+        for name in files:
+            if not name.lower().endswith((".html", ".htm")):
+                continue
+            try:
+                with open(os.path.join(root, name), "r", encoding="utf-8", errors="ignore") as fp:
+                    html = fp.read()
+            except OSError:
+                continue
+            for url, title in _cards_from_html(html):
+                titles.setdefault(url, title)
+    return titles
+
+
+def _dev_main(url):
+    """轻量预览：抓运行中的 Hexo 首页，只写 source/js/cover-colors.js。"""
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        html = resp.read().decode("utf-8", errors="ignore")
+    text_tones = {}
+    seen = set()
+    for cover, title in _cards_from_html(html):
+        if cover in seen:
+            continue
+        seen.add(cover)
+        try:
+            data = _fetch_thumb(cover)
+            image = Image.open(io.BytesIO(data))
+            tones = _text_tones(image, title)
+        except Exception as exc:
+            print(f"[cover-colors] skip {cover}: {exc}")
+            continue
+        if tones:
+            text_tones[cover] = tones
+    out = os.path.join(BASE_DIR, "blogxyz", "source", "js", "cover-colors.js")
+    payload = "window.__COVER_TEXT_TONES=" + json.dumps(
+        {k: text_tones[k] for k in sorted(text_tones)}, ensure_ascii=False, separators=(",", ":")
+    ) + ";\n"
+    with open(out, "w", encoding="utf-8") as fp:
+        fp.write(payload)
+    print(f"[cover-colors] dev: wrote {len(text_tones)} text tones to {out}")
+    print("[cover-colors] dev: restore the placeholder with "
+          "`git -C blogxyz checkout -- source/js/cover-colors.js` when done")
+    return 0
+
+
 def _extract_urls(html):
     urls = set()
     # filter 会在卡片/头图上写入原始封面 URL
@@ -208,24 +454,31 @@ def _collect_urls():
     return {u for u in urls if _is_cover(u)}
 
 
-def _write_map(colors, tones):
-    payload = 'window.__COVER_COLORS=' + json.dumps(
-        {k: colors[k] for k in sorted(colors)}, ensure_ascii=False, separators=(',', ':')
-    ) + ';\n'
-    if tones:
-        payload += 'window.__COVER_TONES=' + json.dumps(
-            {k: tones[k] for k in sorted(tones)}, ensure_ascii=False, separators=(',', ':')
+def _write_map(colors, tones, text_tones_cn, text_tones_en):
+    def payload(text_tones):
+        out = 'window.__COVER_COLORS=' + json.dumps(
+            {k: colors[k] for k in sorted(colors)}, ensure_ascii=False, separators=(',', ':')
         ) + ';\n'
+        if tones:
+            out += 'window.__COVER_TONES=' + json.dumps(
+                {k: tones[k] for k in sorted(tones)}, ensure_ascii=False, separators=(',', ':')
+            ) + ';\n'
+        if text_tones:
+            out += 'window.__COVER_TEXT_TONES=' + json.dumps(
+                {k: text_tones[k] for k in sorted(text_tones)}, ensure_ascii=False, separators=(',', ':')
+            ) + ';\n'
+        return out
+
     targets = [
-        os.path.join(CN_PUBLIC, 'js', 'cover-colors.js'),
-        os.path.join(CN_PUBLIC, 'en', 'js', 'cover-colors.js'),
-        os.path.join(EN_PUBLIC, 'js', 'cover-colors.js'),
+        (os.path.join(CN_PUBLIC, 'js', 'cover-colors.js'), text_tones_cn),
+        (os.path.join(CN_PUBLIC, 'en', 'js', 'cover-colors.js'), text_tones_en),
+        (os.path.join(EN_PUBLIC, 'js', 'cover-colors.js'), text_tones_en),
     ]
-    for path in targets:
+    for path, text_tones in targets:
         if not os.path.isdir(os.path.dirname(path)):
             continue
         with open(path, 'w', encoding='utf-8') as fp:
-            fp.write(payload)
+            fp.write(payload(text_tones))
         print(f"[cover-colors] wrote {path}")
 
 
@@ -265,10 +518,29 @@ def _version_cover_colors_urls(root):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dev",
+        nargs="?",
+        const="http://localhost:4000/",
+        metavar="URL",
+        help="generate blogxyz/source/js/cover-colors.js from a running dev server",
+    )
+    args = parser.parse_args()
+    if args.dev:
+        if Image is None:
+            print("[cover-colors] Pillow not installed; cannot compute text tones")
+            return 1
+        return _dev_main(args.dev)
+
     urls = _collect_urls()
     print(f"[cover-colors] {len(urls)} cover URLs")
     colors = {}
     tones = {}
+    text_tones_cn = {}
+    text_tones_en = {}
+    titles_cn = _collect_card_titles(CN_PUBLIC, skip_en=True)
+    titles_en = _collect_card_titles(EN_PUBLIC)
     if Image is not None:
         for i, url in enumerate(sorted(urls), 1):
             try:
@@ -276,6 +548,10 @@ def main():
                 image = Image.open(io.BytesIO(data))
                 rgb = _dominant_color(image)
                 tone = _bottom_tone(image)
+                title_cn = titles_cn.get(url)
+                title_en = titles_en.get(url)
+                per_cn = _text_tones(image, title_cn, use_font=True) if title_cn else None
+                per_en = _text_tones(image, title_en, use_font=False) if title_en else None
             except Exception as exc:  # 单张失败不影响构建
                 print(f"[cover-colors] skip {url}: {exc}")
                 continue
@@ -288,13 +564,22 @@ def main():
                 tones[url] = tone
                 if decoded != url:
                     tones[decoded] = tone
+            if per_cn:
+                text_tones_cn[url] = per_cn
+                if decoded != url:
+                    text_tones_cn[decoded] = per_cn
+            if per_en:
+                text_tones_en[url] = per_en
+                if decoded != url:
+                    text_tones_en[decoded] = per_en
             if i % 20 == 0:
                 print(f"[cover-colors] {i}/{len(urls)}")
-    _write_map(colors, tones)
+    _write_map(colors, tones, text_tones_cn, text_tones_en)
     changed = _version_cover_colors_urls(CN_PUBLIC)
     changed += _version_cover_colors_urls(EN_PUBLIC)
     print(f"[cover-colors] versioned cover-colors.js in {changed} HTML files")
-    print(f"[cover-colors] done: {len(colors)} colors, {len(tones)} tones")
+    print(f"[cover-colors] done: {len(colors)} colors, {len(tones)} tones, "
+          f"{len(text_tones_cn)} cn text tones, {len(text_tones_en)} en text tones")
     return 0
 
 
