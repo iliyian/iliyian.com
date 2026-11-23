@@ -106,7 +106,7 @@ def _srgb_linear(value):
     return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
 
 
-def _bottom_tone(image, ratio=math.sqrt(2), sample=32):
+def _bottom_tone(image, ratio=6 / 5, sample=32):
     """按卡片封面 cover 裁切后底部 25% 的平均亮度判断用黑字还是白字。"""
     image = image.convert("RGBA")
     width, height = image.size
