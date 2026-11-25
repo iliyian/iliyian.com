@@ -2,6 +2,7 @@
 """预计算封面主色：扫描构建后的 HTML，用 128px 缩略图算色并生成 JS 映射。
 
 构建流程中在 CN/EN 合并后调用；不缓存，每次构建重新计算。
+同时把首页 .post-bg 封面重写成 √2 最大裁剪框（fit=crop，只裁剪不缩放）。
 """
 import argparse
 import hashlib
@@ -21,6 +22,12 @@ EN_PUBLIC = os.path.join(BASE_DIR, "blogxyz-en", "public")
 THUMB_BASE = "https://r2-imgs.iliyian.com/cdn-cgi/image/width=128,quality=75,format=webp/"
 R2_HOST = "r2-imgs.iliyian.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+# 移动端封面卡比例 √2:1（custom.css）；只裁剪、不缩放
+CARD_ASPECT = math.sqrt(2)
+CROP_BASE = "https://r2-imgs.iliyian.com/cdn-cgi/image/format=webp,quality=80"
+META_BASE = "https://r2-imgs.iliyian.com/cdn-cgi/image/format=json,width=100/"
+IMG_POST_BG_RE = re.compile(r'<img\b[^>]*\bclass\s*=\s*"[^"]*\bpost-bg\b[^"]*"[^>]*>', re.I)
 
 try:
     from PIL import Image
@@ -517,6 +524,92 @@ def _version_cover_colors_urls(root):
     return changed
 
 
+def _origin_path(url):
+    path = urllib.parse.urlparse(url).path
+    path = urllib.parse.unquote(path).lstrip('/')
+    return urllib.parse.quote(path, safe='/')
+
+
+def _fetch_original_size(url):
+    meta_url = META_BASE + _origin_path(url)
+    req = urllib.request.Request(meta_url, headers={'User-Agent': UA})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    original = data.get('original') or {}
+    return int(original['width']), int(original['height'])
+
+
+def _cover_crop_size(width, height):
+    if width <= 0 or height <= 0:
+        return None
+    if width / height > CARD_ASPECT:
+        crop_w = _round_half_up(height * CARD_ASPECT)
+        crop_h = height
+    else:
+        crop_w = width
+        crop_h = _round_half_up(width / CARD_ASPECT)
+    return max(1, min(width, crop_w)), max(1, min(height, crop_h))
+
+
+def _cover_crop_url(url, width, height):
+    size = _cover_crop_size(width, height)
+    if not size:
+        return None
+    crop_w, crop_h = size
+    return f"{CROP_BASE},width={crop_w},height={crop_h},fit=crop,gravity=center/{_origin_path(url)}"
+
+
+def _rewrite_cover_crops(root, size_cache, crop_cache):
+    """把首页 .post-bg 封面重写成 √2 最大裁剪框（fit=crop，不缩放）。"""
+    if not os.path.isdir(root):
+        return 0, 0
+    changed_files = 0
+    changed_tags = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            if not filename.lower().endswith('.html'):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, 'r', encoding='utf-8', newline='') as fp:
+                    text = fp.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            def replace_tag(match):
+                nonlocal changed_tags
+                tag = match.group(0)
+                cover_m = re.search(r'\bdata-cover-src\s*=\s*"([^"]*)"', tag, re.I)
+                lazy_m = re.search(r'\bdata-lazy-src\s*=\s*"([^"]*)"', tag, re.I)
+                if not cover_m or not lazy_m:
+                    return tag
+                cover = unescape(cover_m.group(1)).strip().strip("'\"")
+                if not _is_cover(cover):
+                    return tag
+                if cover not in crop_cache:
+                    try:
+                        size = size_cache.get(cover)
+                        if size is None:
+                            size = _fetch_original_size(cover)
+                            size_cache[cover] = size
+                        crop_cache[cover] = _cover_crop_url(cover, size[0], size[1])
+                    except Exception as exc:
+                        print(f"[cover-crops] skip {cover}: {exc}")
+                        crop_cache[cover] = None
+                crop_url = crop_cache[cover]
+                if not crop_url:
+                    return tag
+                changed_tags += 1
+                return tag.replace(lazy_m.group(0), 'data-lazy-src="' + crop_url + '"')
+
+            new_text = IMG_POST_BG_RE.sub(replace_tag, text)
+            if new_text != text:
+                with open(path, 'w', encoding='utf-8', newline='') as fp:
+                    fp.write(new_text)
+                changed_files += 1
+    return changed_files, changed_tags
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -578,6 +671,17 @@ def main():
     changed = _version_cover_colors_urls(CN_PUBLIC)
     changed += _version_cover_colors_urls(EN_PUBLIC)
     print(f"[cover-colors] versioned cover-colors.js in {changed} HTML files")
+
+    size_cache = {}
+    crop_cache = {}
+    crop_files = 0
+    crop_tags = 0
+    for root in (CN_PUBLIC, EN_PUBLIC):
+        files, tags = _rewrite_cover_crops(root, size_cache, crop_cache)
+        crop_files += files
+        crop_tags += tags
+    print(f"[cover-crops] cropped covers in {crop_files} HTML files, {crop_tags} tags")
+
     print(f"[cover-colors] done: {len(colors)} colors, {len(tones)} tones, "
           f"{len(text_tones_cn)} cn text tones, {len(text_tones_en)} en text tones")
     return 0
